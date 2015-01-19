@@ -1,0 +1,50 @@
+---
+runtime: shiny
+---
+```{r, echo=FALSE, results='hide'}
+## TODO check boundaries on interval displays
+suppressMessages({
+  source("importer.R"); source("analysis.R"); source("data_view.R"); source("forecast_view.R"); require(ggplot2); require(data.table)
+})
+source_data <- reactive({
+  ## get source path from file upload
+  source_path <- "cleaned_confirmed.csv"
+  importer(source_path, date.format = "%Y-%m-%d")
+})
+params <- function(src, censor_interval, include_interval, param.guess = c(rate_0=30, decay_rate=0.01)) {
+  end_date <- max(src$Date) - censor_interval
+  start_date <- end_date - include_interval
+  slice <- src[(start_date <= src$Date) & (src$Date <= end_date),] ## data.table doesn't work with shiny for some reason?
+  slice$t <- as.numeric(slice$Date - min(slice$Date))
+  res <- optim(param.guess, exp_pois_ll, gr=NULL, cases = slice$cases, times = slice$t, control=list(fnscale=-1, parscale=c(1,1/1000)), hessian=TRUE)
+  vcmat <- solve(-res$hessian)
+  b <- with(res,{
+    offset <- 1.96*sqrt(vcmat[2,2])
+    par["decay_rate"] + c(low = offset, est=0, hi = -offset) # hi b = hi decay = low time
+  })
+  list(t0 = start_date, par=res$par, b=b)
+}
+```
+```{r, echo=FALSE}
+react_params <- reactive(
+  params(source_data(), input$censor, input$include)
+)
+tabsetPanel(position = "left",
+ tabPanel("Confirmed Case Data", 
+  renderPlot(plot_base(source_data(), input$forecast, input$censor, input$include, react_params())),
+  inputPanel(
+   numericInput("censor","Excluded days from end:", value=7, min=0),
+   numericInput("include","Days used for fitting:", value=60, min=2)
+  ),
+  "This tab shows the input data, and allows you to select the fitting interval.  It also shows the start of the forecasting output relative to the available data."
+ ),
+ tabPanel("Forecasting", 
+  renderPlot(forecast_plot(input$forecast, input$ahead, react_params())),
+  inputPanel(
+   dateInput("forecast","Forecast from:", value = Sys.Date()),
+   numericInput("ahead","Project Out Days:", value=180, min=10)
+  ),
+  "This tab shows the forecasts relevant to satisfying the WHO criteria to declare the region disease free.  p_0 refers to probability of observing 0 cases on that day, and p_start / p_end refer to the probability of entering / completing the zero-cases-observed interval."
+ )
+)
+```
